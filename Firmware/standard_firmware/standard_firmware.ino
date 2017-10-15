@@ -15,6 +15,8 @@
 
 // include the library code:
 #include <LiquidCrystal.h>
+#include "si5351.h"
+#include "Wire.h"
 
 // * LCD RS pin to digital pin 8
 // * LCD Enable pin to digital pin 9
@@ -25,13 +27,6 @@
 
 // initialize the library with the numbers of the interface pins
 LiquidCrystal lcd(8, 9, 15, 14, 16, 10);
-
-#define FQ_UD 4
-#define SDAT 3
-#define SCLK 5
-#define RESET 2
-#define MODE A2
-#define BAND A3
 
 
 long Fstart = 1000000;  // Start Frequency for sweep
@@ -44,15 +39,20 @@ byte mode_pressed = 0;
 int mode = 1;
 
 // CALIBRATION VALUES
-// set AD9850 to zero output, measure FWD and REV over a long period for these values. If not, set both equal to 0.
-int fwdOffset = 6; //6 compensates for idle noise on the fwd diode and amplifier
-int revOffset = 4; //4 compensates for idle noise on the fwd diode and amplifier
+// set signal generator to zero output, measure FWD and REV over a long period for these values. If not, set both equal to 0.
+int fwdOffset = 0; //6 compensates for idle noise on the fwd diode and amplifier
+int revOffset = 0; //4 compensates for idle noise on the fwd diode and amplifier
 // Short the antenna port to ground, measure FWD and REV over a sweep for this ratio (REV/FWD). If not, set  equal to 1.
 // see comments in PerformSweep() about alternative compensation schemes....there is a frequency dependent noise component.
-double diodeComp = 0.9414309839;
+double diodeComp = 1;
 // Short the diode cathodes together, measure FWD and REV over a sweep for this ratio (FWD/REV). If not, set both equal to 1.
 // see comments in PerformSweep() about alternative compensation schemes....there is a frequency dependent noise component.
-double gainComp = 0.995193251;
+double gainComp = 1;
+
+//Look at the Si5351 library to determine the calibration value for your Si5351 - https://github.com/etherkit/Si5351Arduino
+#define SI5351_CORRECTION 0 
+
+Si5351 si5351;
 
 void setup() {
   // set up the LCD's number of columns and rows:
@@ -61,11 +61,11 @@ void setup() {
   // Print a message to the LCD.
   lcd.print("Antenna Analyzer");
 
-  // Configure DDS control pins for digital output
-  pinMode(FQ_UD, OUTPUT);
-  pinMode(SCLK, OUTPUT);
-  pinMode(SDAT, OUTPUT);
-  pinMode(RESET, OUTPUT);
+  //Initialize the DDS module
+  si5351.init(SI5351_CRYSTAL_LOAD_8PF, 0, SI5351_CORRECTION);
+
+  //Set a 2MA drive strength - 3dBm.  This can be adjusted to 4, 6 or 8 mA, per your needs
+  si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_2MA);
 
   // Set up analog inputs on A0 and A1, internal reference voltage
   pinMode(A0, INPUT);
@@ -74,16 +74,16 @@ void setup() {
 
   // initialize serial communication
   Serial.begin(115200);
-
-  // Reset the DDS
-  digitalWrite(RESET, HIGH);
-  digitalWrite(RESET, LOW);
+  Serial.println("Anteanna Analyzer");
 
   //Initialise the incoming serial number to zero
   serial_input_number = 0;
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print("1-30 MHz");
+
+  Fstart = 6000000;
+  Fstop = 8000000;
 }
 
 void loop() {
@@ -150,7 +150,7 @@ void loop() {
     }
   }
 
-  if ((digitalRead(BAND) == LOW) or (mode_pressed == 1)) {
+  if (mode_pressed == 1) {
     mode_pressed = 0;
     mode += 1;
     if (mode == 12) {
@@ -196,6 +196,7 @@ void loop() {
         lcd.clear();
         lcd.setCursor(0, 0);
         lcd.print("40m");
+        Serial.print("40m");
         Fstart = 6000000;
         Fstop = 8000000;
         break;
@@ -262,6 +263,9 @@ void Perform_sweep() {
 
   // Start loop
   for (long i = 0; i <= num_steps; i++) {
+    FWD = 0;
+    REV = 0;
+    
     // Calculate current frequency
     current_freq = Fstart + i * ((Fstop - Fstart) / num_steps);
 
@@ -270,20 +274,19 @@ void Perform_sweep() {
     delay(1);
 
     //discard a few measurements
-    for (int j = 0; j < 19; j++) {
+    for (int j = 0; j < 100; j++) {
       analogRead(A1);
       analogRead(A0);
     }
 
-    // Wait a little for settling
-    if (digitalRead(BAND) == LOW) {
-      mode_pressed = 1;
-    }
+    
+    delay(10);
 
     // Average the reverse and foward voltages and calibrate them
     for (int k = 0; k < 50; k++) {
       REV += (analogRead(A0) - revOffset);
       FWD += (analogRead(A1) - fwdOffset);
+      delay(1);
     }
     FWD /= 50;
     REV /= 50;
@@ -302,6 +305,10 @@ void Perform_sweep() {
 
     if (REV >= FWD) {
       // To avoid a divide by zero or negative VSWR then set to max 999
+      Serial.print("reverse - ");
+      Serial.print(FWD);
+      Serial.print(", ");
+      Serial.println(REV);
       VSWR = 999;
     } else {
       // Calculate VSWR
@@ -351,34 +358,12 @@ void Perform_sweep() {
   else
     lcd.setCursor(10, 1);
   lcd.print(minVSWR, 3);
+
+  si5351.output_enable(SI5351_CLK0, 0);
 }
 
 void SetDDSFreq(long Freq_Hz) {
-  // Calculate the DDS word - from AD9850 Datasheet
-  int32_t f = Freq_Hz * 4294967295 / 125000000;
-
-  // Send one byte at a time
-  for (int b = 0; b < 4; b++, f >>= 8) {
-    //    SPI.transfer(f & 0xFF);
-    send_byte(f & 0xFF);
-  }
-
-  // 5th byte needs to be zeros
-  //SPI.transfer(0);
-  send_byte(0);
-
-  // Strobe the Update pin to tell DDS to use values
-  digitalWrite(FQ_UD, HIGH);
-  digitalWrite(FQ_UD, LOW);
-}
-
-void send_byte(byte data_to_send) {
-  // Bit bang the byte over the SPI bus
-  for (int i = 0; i < 8; i++, data_to_send >>= 1) {
-    // Set Data bit on output pin
-    digitalWrite(SDAT, data_to_send & 0x01);
-    // Strobe the clock pin
-    digitalWrite(SCLK, HIGH);
-    digitalWrite(SCLK, LOW);
-  }
+  unsigned long long frequency_cHz = Freq_Hz * 100ULL;
+  si5351.set_freq(frequency_cHz, SI5351_CLK0);
+  si5351.output_enable(SI5351_CLK0, 1);
 }

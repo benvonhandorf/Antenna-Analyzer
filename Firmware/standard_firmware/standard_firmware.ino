@@ -74,12 +74,16 @@ void setup() {
 
   // initialize serial communication
   Serial.begin(115200);
+  Serial.println("Anteanna Analyzer");
 
   //Initialise the incoming serial number to zero
   serial_input_number = 0;
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print("1-30 MHz");
+
+  Fstart = 6000000;
+  Fstop = 8000000;
 }
 
 void loop() {
@@ -192,6 +196,7 @@ void loop() {
         lcd.clear();
         lcd.setCursor(0, 0);
         lcd.print("40m");
+        Serial.print("40m");
         Fstart = 6000000;
         Fstop = 8000000;
         break;
@@ -258,6 +263,9 @@ void Perform_sweep() {
 
   // Start loop
   for (long i = 0; i <= num_steps; i++) {
+    FWD = 0;
+    REV = 0;
+    
     // Calculate current frequency
     current_freq = Fstart + i * ((Fstop - Fstart) / num_steps);
 
@@ -266,18 +274,19 @@ void Perform_sweep() {
     delay(1);
 
     //discard a few measurements
-    for (int j = 0; j < 19; j++) {
+    for (int j = 0; j < 100; j++) {
       analogRead(A1);
       analogRead(A0);
     }
 
-    //Wait a few ms for the clock to settle
-    delay(20);
+    
+    delay(10);
 
     // Average the reverse and foward voltages and calibrate them
     for (int k = 0; k < 50; k++) {
       REV += (analogRead(A0) - revOffset);
       FWD += (analogRead(A1) - fwdOffset);
+      delay(1);
     }
     FWD /= 50;
     REV /= 50;
@@ -296,6 +305,10 @@ void Perform_sweep() {
 
     if (REV >= FWD) {
       // To avoid a divide by zero or negative VSWR then set to max 999
+      Serial.print("reverse - ");
+      Serial.print(FWD);
+      Serial.print(", ");
+      Serial.println(REV);
       VSWR = 999;
     } else {
       // Calculate VSWR
@@ -345,9 +358,12 @@ void Perform_sweep() {
   else
     lcd.setCursor(10, 1);
   lcd.print(minVSWR, 3);
+
+  si5351.output_enable(SI5351_CLK0, 0);
 }
 
 void SetDDSFreq(long Freq_Hz) {
   unsigned long long frequency_cHz = Freq_Hz * 100ULL;
   si5351.set_freq(frequency_cHz, SI5351_CLK0);
+  si5351.output_enable(SI5351_CLK0, 1);
 }
